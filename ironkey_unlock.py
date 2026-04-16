@@ -26,15 +26,21 @@ import sys
 import time
 
 try:
-    from Crypto.Cipher import AES
-    from Crypto.Util.number import getPrime, inverse
+    from Cryptodome.Cipher import AES
+    from Cryptodome.Util.number import getPrime, inverse
 except ImportError:
-    print(
-        "Error: pycryptodome is required.\n"
-        "\n"
-        "Install with: pip install pycryptodome"
-    )
-    sys.exit(1)
+    try:
+        from Crypto.Cipher import AES
+        from Crypto.Util.number import getPrime, inverse
+    except ImportError:
+        print(
+            "Error: pycryptodome is required.\n"
+            "\n"
+            "Install with one of:\n"
+            "  pip install pycryptodome\n"
+            "  apt install python3-pycryptodome"
+        )
+        sys.exit(1)
 
 
 VID_KINGSTON = 0x0951
