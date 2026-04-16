@@ -500,17 +500,33 @@ def send_unlock(fd, shared, password):
     send_hid(fd, 0x89, 0x00, "none")
 
 
+def block_device_usb_vid(name):
+    path = os.path.realpath(f"/sys/block/{name}/device")
+    while path != "/":
+        vid_file = os.path.join(path, "idVendor")
+        if os.path.isfile(vid_file):
+            try:
+                with open(vid_file) as f:
+                    return int(f.read().strip(), 16)
+            except (ValueError, OSError):
+                return None
+        path = os.path.dirname(path)
+    return None
+
+
 def find_data_partition():
     try:
         result = subprocess.run(
-            ["lsblk", "-dbno", "NAME,SIZE,TYPE,VENDOR"],
+            ["lsblk", "-dbno", "NAME,SIZE,TYPE"],
             capture_output=True, text=True, timeout=5,
         )
         for line in result.stdout.splitlines():
             parts = line.split()
-            if len(parts) >= 4:
+            if len(parts) >= 3:
                 name, size_s, typ = parts[0], parts[1], parts[2]
-                if typ == "disk" and name.startswith("sd") and int(size_s) > 0:
+                if (typ == "disk" and name.startswith("sd")
+                        and int(size_s) > 0
+                        and block_device_usb_vid(name) == VID_KINGSTON):
                     return f"/dev/{name}", int(size_s)
     except Exception:
         pass
