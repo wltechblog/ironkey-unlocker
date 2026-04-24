@@ -181,7 +181,7 @@ def enum_usb_devices():
     return devices
 
 
-def find_ironkey_locked():
+def find_ironkey_locked(serial_filter=None):
     for dev in enum_usb_devices():
         if dev["vid"] != VID_KINGSTON:
             continue
@@ -200,6 +200,9 @@ def find_ironkey_locked():
                 continue
             i_serial = desc[16]
             serial = usb_read_string(fd, i_serial) or ""
+            if serial_filter and serial.upper() != serial_filter.upper():
+                log(f"Skipping {product} (S/N {serial}) - not the target device")
+                continue
             dev["product"] = product
             dev["serial"] = serial
             dev["i_serial"] = i_serial
@@ -214,7 +217,7 @@ def find_ironkey_locked():
     return None
 
 
-def find_ironkey_hidraw():
+def find_ironkey_hidraw(serial_filter=None):
     for dev_name in sorted(
         f for f in os.listdir("/dev") if f.startswith("hidraw")
     ):
@@ -223,6 +226,7 @@ def find_ironkey_hidraw():
                 content = f.read()
             vid = pid = None
             name = ""
+            uniq = ""
             for line in content.splitlines():
                 if line.startswith("HID_ID="):
                     parts = line.split("=")[1].split(":")
@@ -231,9 +235,13 @@ def find_ironkey_hidraw():
                         pid = int(parts[2], 16)
                 elif line.startswith("HID_NAME="):
                     name = line.split("=", 1)[1]
+                elif line.startswith("HID_UNIQ="):
+                    uniq = line.split("=", 1)[1].strip()
             if vid == VID_KINGSTON and any(
                 kw in name.lower() for kw in ("kingston", "locker", "ironkey")
             ):
+                if serial_filter and uniq and uniq.upper() != serial_filter.upper():
+                    continue
                 return f"/dev/{dev_name}", name
         except (OSError, ValueError):
             continue
@@ -514,7 +522,21 @@ def block_device_usb_vid(name):
     return None
 
 
-def find_data_partition():
+def block_device_usb_serial(name):
+    path = os.path.realpath(f"/sys/block/{name}/device")
+    while path != "/":
+        serial_file = os.path.join(path, "serial")
+        if os.path.isfile(serial_file):
+            try:
+                with open(serial_file) as f:
+                    return f.read().strip()
+            except OSError:
+                return None
+        path = os.path.dirname(path)
+    return None
+
+
+def find_data_partition(serial_filter=None):
     try:
         result = subprocess.run(
             ["lsblk", "-dbno", "NAME,SIZE,TYPE"],
@@ -527,6 +549,10 @@ def find_data_partition():
                 if (typ == "disk" and name.startswith("sd")
                         and int(size_s) > 0
                         and block_device_usb_vid(name) == VID_KINGSTON):
+                    if serial_filter:
+                        dev_serial = block_device_usb_serial(name)
+                        if not dev_serial or dev_serial.upper() != serial_filter.upper():
+                            continue
                     return f"/dev/{name}", int(size_s)
     except Exception:
         pass
@@ -538,13 +564,20 @@ def main():
         description="Unlock Kingston IronKey Locker+ USB drive")
     parser.add_argument("-p", "--password",
                         help="Password (otherwise prompted)")
+    parser.add_argument("-s", "--serial",
+                        help="Target device serial number - use when multiple "
+                             "Kingston devices are connected "
+                             "(e.g. -s 80C5F260C690B93031833015)")
     args = parser.parse_args()
+    serial_filter = args.serial or None
 
     log("IronKey Locker+ Unlock Tool")
     log("=" * 40)
+    if serial_filter:
+        log(f"Targeting serial: {serial_filter}")
 
     # Step 1: Check if already unlocked
-    part_dev, part_size = find_data_partition()
+    part_dev, part_size = find_data_partition(serial_filter)
     if part_dev and part_size > 1_000_000:
         log(f"Data partition already visible at {part_dev} "
             f"({part_size / (1 << 30):.1f} GiB)")
@@ -557,13 +590,16 @@ def main():
         return 1
 
     # Step 3: Find hidraw device (HID mode) or locked USB device
-    hidraw_path, hid_name = find_ironkey_hidraw()
+    hidraw_path, hid_name = find_ironkey_hidraw(serial_filter)
     if hidraw_path:
         log(f"Found HID device: {hidraw_path} ({hid_name})")
     else:
-        dev = find_ironkey_locked()
+        dev = find_ironkey_locked(serial_filter)
         if not dev:
-            log("Error: No IronKey device found. Plug it in and try again.")
+            if serial_filter:
+                log(f"Error: No IronKey with serial {serial_filter} found.")
+            else:
+                log("Error: No IronKey device found. Plug it in and try again.")
             log("  (lsusb | grep -i kingston)")
             return 1
 
@@ -578,7 +614,7 @@ def main():
             log("  Try physically replugging the device.")
             return 1
 
-        hidraw_path, hid_name = find_ironkey_hidraw()
+        hidraw_path, hid_name = find_ironkey_hidraw(serial_filter)
         if not hidraw_path:
             log("Error: PID switch completed but no HID device found.")
             log("  Try replugging the device.")
@@ -608,7 +644,7 @@ def main():
     log("Waiting for data partition...")
     for _ in range(10):
         time.sleep(1)
-        part_dev, part_size = find_data_partition()
+        part_dev, part_size = find_data_partition(serial_filter)
         if part_dev and part_size > 1_000_000:
             log(f"SUCCESS: Data partition at {part_dev} "
                 f"({part_size / (1 << 30):.1f} GiB)")
